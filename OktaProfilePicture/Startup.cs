@@ -8,6 +8,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Okta.AspNetCore;
 
 namespace OktaProfilePicture
 {
@@ -23,6 +25,20 @@ namespace OktaProfilePicture
         // This method gets called by the runtime. Use this method to add services to the container.
         public void ConfigureServices(IServiceCollection services)
         {
+            services.AddAuthentication(options =>
+                {
+                    options.DefaultAuthenticateScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+                    options.DefaultSignInScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+                    options.DefaultChallengeScheme = OktaDefaults.MvcAuthenticationScheme;
+                })
+                .AddCookie()
+                .AddOktaMvc(new OktaMvcOptions
+                {
+                    OktaDomain = Configuration["Okta:Domain"],
+                    ClientId = Configuration["Okta:ClientId"],
+                    ClientSecret = Configuration["Okta:ClientSecret"]
+                });
+
             services.AddControllersWithViews();
         }
 
@@ -43,7 +59,8 @@ namespace OktaProfilePicture
             app.UseStaticFiles();
 
             app.UseRouting();
-
+            
+            app.UseAuthentication();
             app.UseAuthorization();
 
             app.UseEndpoints(endpoints =>
