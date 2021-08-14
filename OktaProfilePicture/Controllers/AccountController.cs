@@ -1,5 +1,8 @@
-﻿using System.Linq;
+﻿using System;
+using System.Linq;
 using System.Threading.Tasks;
+using Azure.Storage.Blobs;
+using Azure.Storage.Sas;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.JsonWebTokens;
@@ -14,6 +17,8 @@ namespace OktaProfilePicture.Controllers
     {
         private readonly OktaClient oktaClient;
 
+        private readonly BlobContainerClient blobContainerClient;
+
         public AccountController(IConfiguration configuration)
         {
             oktaClient = new OktaClient(new OktaClientConfiguration
@@ -21,6 +26,11 @@ namespace OktaProfilePicture.Controllers
                 OktaDomain = configuration["Okta:Domain"],
                 Token = configuration["Okta:ApiToken"]
             });
+            
+            var blobServiceClient = new BlobServiceClient(configuration["BlobStorageConnectionString"]);
+            blobContainerClient = blobServiceClient.GetBlobContainerClient("okta-profile-picture-container");
+
+            blobContainerClient.CreateIfNotExists();
         }
 
         public IActionResult SignIn()
@@ -36,6 +46,18 @@ namespace OktaProfilePicture.Controllers
         public async Task<IActionResult> Profile()
         {
             var user = await GetOktaUser();
+
+            var sasBuilder = new BlobSasBuilder
+            {
+                StartsOn = DateTimeOffset.UtcNow,
+                ExpiresOn = DateTimeOffset.UtcNow.AddMinutes(15),
+            };
+
+            sasBuilder.SetPermissions(BlobSasPermissions.Read);
+
+            var url = blobContainerClient.GetBlobClient(user.Profile.GetProperty<string>("profileImageKey")).GenerateSasUri(sasBuilder);
+
+            ViewData["ProfileImageUrl"] = url;
 
             return View(user);
         }
@@ -68,6 +90,13 @@ namespace OktaProfilePicture.Controllers
                 user.Profile.CountryCode = profile.CountryCode;
 
                 await oktaClient.Users.UpdateUserAsync(user, user.Id, null);
+
+                using (var stream = profile.ProfileImage.OpenReadStream())
+                {
+                    var blobName = Guid.NewGuid().ToString();
+                    await blobContainerClient.UploadBlobAsync(blobName, stream);
+                    user.Profile.SetProperty("profileImageKey", blobName);
+                }
 
                 return RedirectToAction("Profile");
             }

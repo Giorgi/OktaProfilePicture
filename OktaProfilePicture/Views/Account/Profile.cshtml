@@ -39,6 +39,8 @@
             @Html.DisplayFor(model => model.Profile.CountryCode)
         </dd>
     </dl>
+        
+    <img src="@ViewData["ProfileImageUrl"]" width="300" height="300"/>
 </div>
 <div>
     <a asp-action="EditProfile">Edit Profile</a>

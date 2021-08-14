@@ -1,4 +1,5 @@
 ﻿using System.ComponentModel.DataAnnotations;
+using Microsoft.AspNetCore.Http;
 
 namespace OktaProfilePicture.Models
 {
@@ -16,6 +17,10 @@ namespace OktaProfilePicture.Models
 
         public string City { get; set; }
 
+        [Display(Name = "Country Code")]
         public string CountryCode { get; set; }
+
+        [Display(Name = "Profile Image")]
+        public IFormFile ProfileImage { get; set; }
     }
 }
