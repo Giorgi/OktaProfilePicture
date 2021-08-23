@@ -4,6 +4,8 @@ using System.Threading.Tasks;
 using Azure.Storage.Blobs;
 using Azure.Storage.Sas;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Azure.CognitiveServices.Vision.Face;
+using Microsoft.Azure.CognitiveServices.Vision.Face.Models;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.JsonWebTokens;
 using Okta.AspNetCore;
@@ -16,7 +18,7 @@ namespace OktaProfilePicture.Controllers
     public class AccountController : Controller
     {
         private readonly OktaClient oktaClient;
-
+        private readonly FaceClient faceClient;
         private readonly BlobContainerClient blobContainerClient;
 
         public AccountController(IConfiguration configuration)
@@ -26,11 +28,13 @@ namespace OktaProfilePicture.Controllers
                 OktaDomain = configuration["Okta:Domain"],
                 Token = configuration["Okta:ApiToken"]
             });
-            
-            var blobServiceClient = new BlobServiceClient(configuration["BlobStorageConnectionString"]);
+
+            var blobServiceClient = new BlobServiceClient(configuration["Azure:BlobStorageConnectionString"]);
             blobContainerClient = blobServiceClient.GetBlobContainerClient("okta-profile-picture-container");
 
             blobContainerClient.CreateIfNotExists();
+
+            faceClient = new FaceClient(new ApiKeyServiceClientCredentials(configuration["Azure:SubscriptionKey"])) { Endpoint = configuration["Azure:FaceClientEndpoint"] };
         }
 
         public IActionResult SignIn()
@@ -80,28 +84,71 @@ namespace OktaProfilePicture.Controllers
         [ValidateAntiForgeryToken]
         public async Task<IActionResult> EditProfile(UserProfileViewModel profile)
         {
-            if (ModelState.IsValid)
+            if (!ModelState.IsValid)
             {
-                var user = await GetOktaUser();
-                user.Profile.FirstName = profile.FirstName;
-                user.Profile.LastName = profile.LastName;
-                user.Profile.Email = profile.Email;
-                user.Profile.City = profile.City;
-                user.Profile.CountryCode = profile.CountryCode;
-
-                await oktaClient.Users.UpdateUserAsync(user, user.Id, null);
-
-                using (var stream = profile.ProfileImage.OpenReadStream())
-                {
-                    var blobName = Guid.NewGuid().ToString();
-                    await blobContainerClient.UploadBlobAsync(blobName, stream);
-                    user.Profile.SetProperty("profileImageKey", blobName);
-                }
-
-                return RedirectToAction("Profile");
+                return View(profile);
             }
 
-            return View(profile);
+            var user = await GetOktaUser();
+            user.Profile.FirstName = profile.FirstName;
+            user.Profile.LastName = profile.LastName;
+            user.Profile.Email = profile.Email;
+            user.Profile.City = profile.City;
+            user.Profile.CountryCode = profile.CountryCode;
+
+            var stream = profile.ProfileImage.OpenReadStream();
+            var detectedFaces = await faceClient.Face.DetectWithStreamAsync(stream, recognitionModel: RecognitionModel.Recognition04,
+                                                                            detectionModel: DetectionModel.Detection01);
+
+            if (detectedFaces.Count != 1 || detectedFaces[0].FaceId == null)
+            {
+                ModelState.AddModelError("", $"Detected {detectedFaces.Count} faces instead of 1 face");
+                return View(profile);
+            }
+
+            var personGroupId = user.Id.ToLower();
+
+            if (string.IsNullOrEmpty(user.Profile.GetProperty<string>("personId")))
+            {
+                await faceClient.PersonGroup.CreateAsync(personGroupId, user.Profile.Login,
+                                                         recognitionModel: RecognitionModel.Recognition04);
+
+                stream = profile.ProfileImage.OpenReadStream();
+                var personId = (await faceClient.PersonGroupPerson.CreateAsync(personGroupId, user.Profile.Login)).PersonId;
+                await faceClient.PersonGroupPerson.AddFaceFromStreamAsync(personGroupId, personId, stream);
+
+                user.Profile["personId"] = personId;
+
+                await UpdateUserImage();
+            }
+            else
+            {
+                var faceId = detectedFaces[0].FaceId.Value;
+
+                var personId = new Guid(user.Profile.GetProperty<string>("personId"));
+                var verifyResult = await faceClient.Face.VerifyFaceToPersonAsync(faceId, personId, personGroupId);
+
+                if (verifyResult.IsIdentical && verifyResult.Confidence >= 0.8)
+                {
+                    await UpdateUserImage();
+                }
+                else
+                {
+                    ModelState.AddModelError("", "The uploaded picture doesn't match your current picture");
+                    return View(profile);
+                }
+            }
+
+            await oktaClient.Users.UpdateUserAsync(user, user.Id, null);
+            return RedirectToAction("Profile");
+
+            async Task UpdateUserImage()
+            {
+                var blobName = Guid.NewGuid().ToString();
+                await blobContainerClient.DeleteBlobAsync(user.Profile.GetProperty<string>("profileImageKey"));
+                await blobContainerClient.UploadBlobAsync(blobName, profile.ProfileImage.OpenReadStream());
+                user.Profile.SetProperty("profileImageKey", blobName);
+            }
         }
 
         private async Task<IUser> GetOktaUser()
